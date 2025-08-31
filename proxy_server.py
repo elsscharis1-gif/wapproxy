@@ -59,7 +59,8 @@ class HTTPSToHTTPProxyHandler(http.server.BaseHTTPRequestHandler):
             
             # Check if this is a self-referencing request to prevent infinite loops
             host_header = self.headers.get('Host', '')
-            if ':5000' in host_header or '127.0.0.1' in host_header or 'localhost' in host_header:
+            server_ports = [':80', ':5000', ':8000']
+            if any(port in host_header for port in server_ports) or '127.0.0.1' in host_header or 'localhost' in host_header:
                 self._send_error_response(HTTPStatus.BAD_REQUEST, "Cannot proxy to self - please specify a target website")
                 return
             
@@ -75,7 +76,8 @@ class HTTPSToHTTPProxyHandler(http.server.BaseHTTPRequestHandler):
                     # Default behavior: convert to HTTPS
                     # Extract host from Host header if available, but prevent self-reference
                     host = self.headers.get('Host', 'www.google.com')
-                    if ':5000' in host or '127.0.0.1' in host or 'localhost' in host:
+                    server_ports = [':80', ':5000', ':8000']
+                    if any(port in host for port in server_ports) or '127.0.0.1' in host or 'localhost' in host:
                         host = 'www.google.com'
                     target_url = f"https://{host}{self.path}"
             else:
@@ -114,33 +116,22 @@ class HTTPSToHTTPProxyHandler(http.server.BaseHTTPRequestHandler):
                 ssl_context.verify_mode = ssl.CERT_NONE
                 logging.warning("SSL verification disabled - use with caution")
             
-            # Prepare headers
-            headers = {}
-            header_count = 0
-            max_headers = 50  # Limit to prevent "too many headers" error
+            # Prepare headers with strict filtering to prevent issues
+            headers = {
+                'User-Agent': self.config.user_agent,
+                'Accept': '*/*',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'close'
+            }
             
-            # Forward relevant headers, but modify some for compatibility
+            # Only forward essential headers to prevent "too many headers" error
+            essential_headers = ['accept', 'accept-language', 'authorization', 'cookie', 'referer']
             for header_name, header_value in self.headers.items():
-                if header_count >= max_headers:
-                    break
-                    
                 header_name_lower = header_name.lower()
-                
-                # Skip headers that should not be forwarded
-                if header_name_lower in ['host', 'connection', 'accept-encoding', 'content-length', 'transfer-encoding']:
-                    continue
-                    
-                # Skip headers that might cause issues
-                if header_name_lower.startswith('sec-') or header_name_lower.startswith('x-'):
-                    continue
-                    
-                headers[header_name] = header_value
-                header_count += 1
+                if header_name_lower in essential_headers:
+                    headers[header_name] = header_value
             
-            # Set appropriate headers for the target request
-            headers['User-Agent'] = self.config.user_agent
-            headers['Accept-Encoding'] = 'gzip, deflate'
-            headers['Connection'] = 'close'
+            # Headers are already set above
             
             # Create request
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -261,7 +252,7 @@ def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='HTTPS-to-HTTP Proxy Server for Legacy WAP Browsers')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to (default: 0.0.0.0)')
-    parser.add_argument('--port', type=int, default=8000, help='Port to bind to (default: 8000)')
+    parser.add_argument('--port', type=int, default=80, help='Port to bind to (default: 80)')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds (default: 30)')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], 
                        default='INFO', help='Log level (default: INFO)')
@@ -289,7 +280,7 @@ def main():
         logging.info(f"Starting HTTPS-to-HTTP proxy server on {args.host}:{args.port}")
         logging.info(f"Timeout: {args.timeout}s, SSL verification: {'disabled' if args.ignore_ssl else 'enabled'}")
         logging.info("Configure your WAP browser to use this server as an HTTP proxy")
-        logging.info("Example usage: Set proxy to this server's IP and port 5000")
+        logging.info("Example usage: Set proxy to this server's IP and port 80")
         logging.info("Press Ctrl+C to stop the server")
         
         # Start server
