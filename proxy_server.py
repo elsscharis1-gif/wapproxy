@@ -17,6 +17,7 @@ import socket
 from http import HTTPStatus
 import gzip
 import io
+import re
 from config import ProxyConfig
 
 
@@ -84,6 +85,13 @@ class HTTPSToHTTPProxyHandler(http.server.BaseHTTPRequestHandler):
                 target_url = self.path
             
             logging.info(f"Proxying {method} request to: {target_url}")
+            
+            # Store current target host for link translation
+            try:
+                parsed_target = urllib.parse.urlparse(target_url)
+                self._current_target_host = parsed_target.netloc
+            except:
+                self._current_target_host = 'www.google.com'
             
             # Prepare request data
             request_data = None
@@ -177,6 +185,14 @@ class HTTPSToHTTPProxyHandler(http.server.BaseHTTPRequestHandler):
                 except Exception as e:
                     logging.warning(f"Failed to decompress gzip content: {e}")
             
+            # Process HTML content to translate links
+            content_type = response['headers'].get('content-type', '').lower()
+            if 'text/html' in content_type or 'application/xhtml' in content_type:
+                try:
+                    response_data = self._translate_links_in_html(response_data)
+                except Exception as e:
+                    logging.warning(f"Failed to translate links in HTML: {e}")
+            
             # Send headers with modifications for WAP compatibility
             for header_name, header_value in response['headers'].items():
                 header_name_lower = header_name.lower()
@@ -227,6 +243,62 @@ class HTTPSToHTTPProxyHandler(http.server.BaseHTTPRequestHandler):
         """.encode('utf-8')
         
         self.wfile.write(error_html)
+    
+    def _translate_links_in_html(self, html_data):
+        """Translate all links in HTML to use proxy format"""
+        try:
+            html_content = html_data.decode('utf-8', errors='ignore')
+        except:
+            # If we can't decode as UTF-8, return original data
+            return html_data
+        
+        # Proxy base URL
+        proxy_base = "http://wapproxy.onrender.com/"
+        
+        # Replace URLs in HTML attributes using callback function
+        def replace_url_in_attribute(match):
+            attr_name = match.group(1)  # href=, src=, etc.
+            quote_char = match.group(2)  # " or '
+            url = match.group(3)
+            
+            # Skip if already using proxy format
+            if url.startswith('http://wapproxy.onrender.com/'):
+                return match.group(0)
+            # Skip data URLs, javascript URLs, and fragments
+            if url.startswith(('data:', 'javascript:', '#', 'mailto:')):
+                return match.group(0)
+            
+            # Handle relative URLs
+            if url.startswith('//'):
+                url = 'https:' + url
+            elif url.startswith('/'):
+                # Get current host from the request
+                current_host = getattr(self, '_current_target_host', 'www.google.com')
+                url = f'https://{current_host}{url}'
+            elif not url.startswith(('http://', 'https://')):
+                # Relative URL - get current host
+                current_host = getattr(self, '_current_target_host', 'www.google.com')
+                url = f'https://{current_host}/{url}'
+            
+            # Return the attribute with proxy URL
+            return f'{attr_name}{quote_char}{proxy_base}{url}{quote_char}'
+        
+        # Pattern to match URL attributes - handle both quoted and unquoted URLs
+        url_pattern = r'((?:href|src|action|background)=)(["\'])([^"\'>\s]+)\2'
+        html_content = re.sub(url_pattern, replace_url_in_attribute, html_content, flags=re.IGNORECASE)
+        
+        # Handle JavaScript URLs in onclick, onload, etc.
+        js_pattern = r'(on\w+=["\'][^"\'>]*?)(https?://[^"\'>\s]+)([^"\'>]*["\'])'
+        def replace_js_url(match):
+            prefix = match.group(1)
+            url = match.group(2)
+            suffix = match.group(3)
+            proxy_url = f'{proxy_base}{url}'
+            return f'{prefix}{proxy_url}{suffix}'
+        
+        html_content = re.sub(js_pattern, replace_js_url, html_content, flags=re.IGNORECASE)
+        
+        return html_content.encode('utf-8', errors='ignore')
 
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
